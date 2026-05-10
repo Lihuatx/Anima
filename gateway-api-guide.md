@@ -182,7 +182,9 @@ const conn = new WebSocket('ws://127.0.0.1:18789');
   "role": "assistant",
   "content": [
     { "type": "text", "text": "你好！我是 vv。" },
-    { "type": "tool_call", ... }
+    { "type": "thinking", "thinking": "思考过程..." },
+    { "type": "tool_use", "name": "process", "input": {...} },
+    { "type": "tool_call", "function": { "name": "...", "arguments": "..." } }
   ]
 }
 ```
@@ -420,18 +422,82 @@ conn.on('message', (data) => {
 });
 ```
 
-### 6.5 其他重要事件
+### 6.5 流式增量（Token-Level Streaming）
 
-| 事件 | 触发时机 | 用途 |
-|------|----------|------|
-| `session.message` | 新消息到达 | 实时显示对话内容 |
-| `session.created` | 新会话创建 | 更新会话列表 |
-| `session.changed` | 会话元数据变更 | 同步会话状态 |
-| `chat` | 对话流状态更新 | 跟踪 AI 回复进度 |
-| `health` | 健康状态更新 | 监控连接健康 |
-| `tick` | 周期性心跳 | WebSocket 保活 |
+**`agent` 事件是 Gateway 的流式通道！** AI 回复时，会通过 `agent` 事件逐 token 推送。
 
-`chat` 事件格式：
+#### agent 事件流
+
+| `agent` stream 类型 | 说明 |
+|---------------------|------|
+| `assistant` | **AI 文本回复的流式 delta**（逐 token 推送） |
+| `item` | 工具调用生命周期（开始/结束） |
+| `lifecycle` | 运行生命周期（phase: started/error/completed） |
+
+#### assistant 流（文本逐 token 推送）
+
+```json
+{
+  "type": "event",
+  "event": "agent",
+  "payload": {
+    "runId": "42848fd7-...",
+    "sessionKey": "agent:main:main",
+    "stream": "assistant",       // 流式文本
+    "data": {
+      "text": "完整累积文本",      // 到当前为止的完整文本
+      "delta": "新推送的片段"       // 仅本次新增的增量
+    },
+    "seq": 2,
+    "ts": 1778404022867
+  }
+}
+```
+
+#### item 流（工具调用生命周期）
+
+```json
+{
+  "type": "event",
+  "event": "agent",
+  "payload": {
+    "runId": "42848fd7-...",
+    "sessionKey": "agent:main:main",
+    "stream": "item",             // 工具/物品事件
+    "data": {
+      "itemId": "tool:call_00_...",
+      "phase": "start",           // "start" | "end"
+      "kind": "tool",
+      "title": "process swift-shell",
+      "status": "running",        // "running" | "completed" | "error"
+      "name": "process",
+      "meta": "swift-shell",
+      "toolCallId": "call_00_..."
+    }
+  }
+}
+```
+
+#### lifecycle 流
+
+```json
+{
+  "type": "event",
+  "event": "agent",
+  "payload": {
+    "stream": "lifecycle",
+    "data": { "phase": "started", "endedAt": ..., "error": "..." }
+  }
+}
+```
+
+> 💡 **桌宠开发建议**：
+> - 订阅 `agent(stream: "assistant")` → 逐 token 显示 AI 回复（打字机效果）
+> - 订阅 `agent(stream: "item")` → 检测工具调用，显示「正在查天气...」等状态
+> - 收到 `chat(state: "delta")` 时表示流式进行中
+> - 收到 `chat(state: "final")` 时表示本轮对话结束
+
+
 ```json
 {
   "type": "event",
@@ -835,6 +901,32 @@ agents.list
 agents.create
 agents.update
 agents.delete
+exec.approval.request     // 发起审批请求
+exec.approval.get         // 查看审批详情
+exec.approval.list        // 列出待审批事项
+exec.approval.resolve     // 同意/拒绝审批
+exec.approval.waitDecision // 等待审批结果
+exec.approvals.get        // 查看审批策略
+exec.approvals.set        // 设置审批策略
+plugin.approval.request
+plugin.approval.list
+plugin.approval.waitDecision
+plugin.approval.resolve
+```
+
+> **审批同意/拒绝**：调用 `exec.approval.resolve`，传入 `id`（审批 ID）和 `decision`（`"approve"` 或 `"deny"`），需 `operator.approvals` 权限。
+
+```json
+{
+  "type": "req",
+  "id": "10",
+  "method": "exec.approval.resolve",
+  "params": {
+    "id": "approval-uuid-here",
+    "decision": "approve"
+    // 或 "deny"
+  }
+}
 ```
 
 > 完整方法列表可通过认证后的 `hello-ok.features.methods` 动态获取。
@@ -842,18 +934,20 @@ agents.delete
 ### 所有事件
 
 ```
-connect.challenge
-session.message
-session.created
-sessions.changed
-chat
-health
-tick
-presence
-heartbeat
-cron
-shutdown
-voicewake.changed
+connect.challenge       // 连接挑战（handshake）
+agent                   // 🎯 流式通道：assistant/item/lifecycle
+session.message         // 🎯 完整消息（用户或AI）
+session.tool            // 🎯 工具调用事件
+session.created         // 新会话创建
+sessions.changed        // 会话变更
+chat                    // 对话状态（processing/delta/final）
+health                  // 健康状态
+tick                    // 心跳保活
+presence                // 客户端在线状态
+heartbeat               // 心跳事件流
+cron                    // 定时任务
+shutdown                // 服务关闭
+voicewake.changed       // 语音唤醒配置变更
 exec.approval.requested
 exec.approval.resolved
 node.pair.requested
